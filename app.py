@@ -31,7 +31,7 @@ def extraer_texto(archivo) -> str:
         if nombre.endswith(".docx"):
             import docx
             doc = docx.Document(archivo)
-            return "\n".join(p.texto if hasattr(p, "texto") else p.text for p in doc.paragraphs)
+            return "\n".join(p.text for p in doc.paragraphs)
         if nombre.endswith((".txt", ".md")):
             return archivo.read().decode("utf-8", errors="ignore")
     except Exception as e:
@@ -45,7 +45,7 @@ def validar_rate(v: str) -> str:
     return f"{m.group(1)}{m.group(2)}%" if m else "+0%"
 
 
-def dividir_en_fragmentos(texto: str, maximo: int = 2500) -> list[str]:
+def dividir_en_fragmentos(texto: str, maximo: int = 2500) -> list:
     """Divide el texto en fragmentos: la API falla con textos muy largos."""
     trozos, actual = [], ""
     for linea in texto.splitlines():
@@ -61,18 +61,28 @@ def dividir_en_fragmentos(texto: str, maximo: int = 2500) -> list[str]:
 
 
 async def generar_audio(texto: str, voz: str, rate: str) -> bytes:
-    """Genera el audio por fragmentos con reintentos y lo une en un MP3."""
+    """Genera el audio por fragmentos con reintentos y lo une en un MP3.
+    Compatible con cualquier versión de edge-tts (itera el stream manualmente)."""
     partes = []
     for trozo in dividir_en_fragmentos(texto):
+        buffer = bytearray()
         for intento in range(3):
             try:
+                buffer = bytearray()  # reiniciar por si hubo reintento parcial
                 comun = edge_tts.Communicate(trozo.strip(), voz, rate=rate)
-                partes.append(await comun.stream_to_bytes())
-                break
+                async for mensaje in comun.stream():
+                    if mensaje.get("type") == "audio":
+                        buffer.extend(mensaje.get("data", b""))
+                if len(buffer) > 0:
+                    break  # fragmento exitoso
+                # sin audio: tratarlo como fallo y reintentar
+                await asyncio.sleep(1)
             except edge_tts.exceptions.NoAudioReceived:
                 if intento == 2:
                     raise
                 await asyncio.sleep(1)
+        if len(buffer) > 0:
+            partes.append(bytes(buffer))
     return b"".join(partes)
 
 # ---------------- Interfaz ----------------
@@ -112,7 +122,11 @@ if st.button("🔊 Leer en voz alta", type="primary", disabled=not texto):
             try:
                 audio_bytes = asyncio.run(generar_audio(texto, VOICES[voz_nombre], rate))
                 if not audio_bytes:
-                    st.error("No se recibió audio. Prueba con otra voz o un texto más corto.")
+                    st.error(
+                        "No se recibió audio del servicio. Prueba con otra voz, "
+                        "un texto más corto, o revisa la versión de edge-tts "
+                        "(debe ser 7.x o superior)."
+                    )
                 else:
                     st.success("✅ Audio listo — reprodúcelo abajo.")
                     st.audio(audio_bytes, format="audio/mp3")
@@ -121,8 +135,9 @@ if st.button("🔊 Leer en voz alta", type="primary", disabled=not texto):
                     )
             except edge_tts.exceptions.NoAudioReceived:
                 st.error(
-                    "El servicio de voz no respondió. Verifica que la voz elegida exista, "
-                    "prueba con otra voz o un texto más corto."
+                    "El servicio de voz no respondió. Prueba con otra voz o un "
+                    "texto más corto. Si persiste, actualiza edge-tts en "
+                    "requirements.txt a la versión 7.x."
                 )
             except Exception as e:
                 st.error(f"Error al generar el audio: {e}")
