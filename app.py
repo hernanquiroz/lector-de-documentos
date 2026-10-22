@@ -151,3 +151,11 @@ if st.button("🔊 Leer en voz alta", type="primary", disabled=not texto):
             st.success("✅ Audio listo — reprodúcelo abajo.")
             st.audio(audio_bytes, format="audio/mp3")
             st.download_button("⬇️ Descargar MP3", audio_bytes, "lectura.mp3", "audio/mp3")
+            # ---------------- Créditos ----------------
+st.divider()
+st.markdown(
+    "<p style='text-align: center; color: gray; font-size: 14px;'>"
+    "📖 Lector de Documentos — Diseñado con la IA por <b>Ing. Hernán Quiroz</b>"
+    "</p>",
+    unsafe_allow_html=True,
+)
