@@ -3,6 +3,7 @@ import asyncio
 import pathlib
 import re
 import tempfile
+import time
 
 import edge_tts
 import streamlit as st
@@ -91,7 +92,6 @@ def extraer_paginas(archivo) -> list:
             import docx
             doc = docx.Document(archivo)
             texto = "\n".join(p.text for p in doc.paragraphs)
-            # dividir el DOCX en bloques equivalentes a páginas (~2.500 caracteres)
             while texto:
                 paginas.append(texto[:2500])
                 texto = texto[2500:]
@@ -122,8 +122,8 @@ def dividir_en_fragmentos(texto: str, maximo: int = 2500) -> list:
 
 
 async def generar_fragmento(trozo: str, voz: str, rate: str) -> bytes:
-    """Genera el MP3 de un fragmento con reintentos."""
-    for intento in range(3):
+    """Genera el MP3 de un fragmento con reintentos y pausas (evita errores 429)."""
+    for intento in range(4):
         buffer = bytearray()
         try:
             comun = edge_tts.Communicate(trozo.strip(), voz, rate=rate)
@@ -132,25 +132,39 @@ async def generar_fragmento(trozo: str, voz: str, rate: str) -> bytes:
                     buffer.extend(mensaje.get("data", b""))
             if buffer:
                 return bytes(buffer)
-            await asyncio.sleep(1)
+            time.sleep(2)  # sin audio: esperar y reintentar
         except edge_tts.exceptions.NoAudioReceived:
-            if intento == 2:
+            if intento == 3:
                 raise
-            await asyncio.sleep(1)
+            time.sleep(3 * (intento + 1))  # espera creciente: 3, 6, 9 s
     return b""
 
 
 def generar_audio_gtts(texto: str, idioma: str, progreso=None) -> bytes:
-    """Respaldo gTTS: genera por fragmentos de <5.000 caracteres y los une."""
+    """Respaldo gTTS: fragmentos de <4.500 caracteres, con pausas y reintentos
+    ante el error 429 (Too Many Requests)."""
     trozos = dividir_en_fragmentos(texto, maximo=4500)
     partes = []
     for i, trozo in enumerate(trozos):
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-            gTTS(text=trozo.strip(), lang=idioma).save(tmp.name)
-            partes.append(pathlib.Path(tmp.name).read_bytes())
+        if not trozo.strip():
+            continue
+        for intento in range(4):
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                    gTTS(text=trozo.strip(), lang=idioma).save(tmp.name)
+                    partes.append(pathlib.Path(tmp.name).read_bytes())
+                break
+            except Exception as e:
+                if "429" in str(e) or "Too Many" in str(e):
+                    if intento == 3:
+                        raise
+                    time.sleep(5 * (intento + 1))  # 5, 10, 15 s antes de reintentar
+                else:
+                    raise
         if progreso:
             progreso.progress((i + 1) / len(trozos),
-                               text=f"Google TTS: fragmento {i + 1} de {len(trozos)}")
+                              text=f"Google TTS: fragmento {i + 1} de {len(trozos)}")
+        time.sleep(1.5)  # pausa fija entre peticiones: evita el 429
     return b"".join(partes)
 
 # ---------------- Barra lateral ----------------
@@ -171,6 +185,9 @@ with st.sidebar:
     st.markdown("#### ℹ️ Formatos soportados")
     st.markdown("📄 PDF · 📝 TXT / MD · 📄 DOCX")
     st.caption("Documentos de hasta 300+ páginas.")
+
+    st.divider()
+    st.caption(f"edge-tts versión: {getattr(edge_tts, '__version__', 'desconocida')}")
 
     st.divider()
     st.markdown(
@@ -242,11 +259,13 @@ if st.button("🔊  Leer en voz alta", type="primary",
         audio_bytes = b""
         usar_gtts = False
 
-        # 1) Edge TTS fragmento a fragmento, con barra de progreso en vivo
+        # 1) Edge TTS fragmento a fragmento, con pausas y progreso en vivo
         partes = []
         try:
             for i, trozo in enumerate(fragmentos):
                 partes.append(asyncio.run(generar_fragmento(trozo, voz, rate)))
+                if i % 10 == 9:
+                    time.sleep(2)  # pausa cada 10 fragmentos (~25.000 caracteres)
                 progreso.progress(
                     (i + 1) / len(fragmentos),
                     text=f"Edge TTS: fragmento {i + 1} de {len(fragmentos)}...")
