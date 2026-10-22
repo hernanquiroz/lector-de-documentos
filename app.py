@@ -1,137 +1,80 @@
+import asyncio
+import tempfile
+import pathlib
+
+import edge_tts
 import streamlit as st
 from pypdf import PdfReader
-from gtts import gTTS
-import io
-import os
 
-# Configuración inicial de la página
-st.set_page_config(
-    page_title="Lector de PDF con Voz",
-    page_icon="🎧",
-    layout="wide"
-)
+st.set_page_config(page_title="📖 Lector de Documentos", page_icon="📖")
+st.title("📖 Lector de Documentos y Texto")
+st.caption("Pega un texto o sube un documento (PDF, TXT, DOCX) y escúchalo en voz alta.")
 
-# Título principal
-st.title("🎧 Lector de PDF con Voz")
-st.markdown("""
-### Sube tu documento PDF y escúchalo a través de tus audífonos
----
-""")
+# --- Voces en español (puedes añadir más) ---
+VOICES = {
+    "Español (Colombia) – Male": "es-CO-AlvaroNeural",
+    "Español (Colombia) – Female": "es-CO-SalomeNeural",
+    "Español (España) – Female": "es-ES-ElviraNeural",
+    "Español (México) – Female": "es-MX-DaliaNeural",
+    "Español (EE.UU.) – Female": "es-US-PalomaNeural",
+    "Inglés (EE.UU.) – Female": "en-US-AriaNeural",
+}
 
-# Sidebar con opciones
-st.sidebar.header("⚙️ Configuración")
-language = st.sidebar.selectbox(
-    "Selecciona el idioma de lectura",
-    ["es", "en", "fr", "de", "it", "pt"],
-    index=0,
-    help="es=Español, en=Inglés, fr=Francés, de=Alemán, it=Italiano, pt=Portugués"
-)
+# --- Extraer texto del documento subido ---
+def extraer_texto(archivo) -> str:
+    nombre = archivo.name.lower()
+    if nombre.endswith(".pdf"):
+        lector = PdfReader(archivo)
+        return "\n".join(pagina.extract_text() or "" for pagina in lector.pages)
+    if nombre.endswith(".docx"):
+        import docx
+        doc = docx.Document(archivo)
+        return "\n".join(p.text for p in doc.paragraphs)
+    if nombre.endswith((".txt", ".md")):
+        return archivo.read().decode("utf-8", errors="ignore")
+    return ""
 
-accent = st.sidebar.selectbox(
-    "Selecciona el acento (solo para español)",
-    ["com.mx", "es", "com.ar", "com.co"],
-    index=0,
-    help="com.mx=México, es=España, com.ar=Argentina, com.co=Colombia"
-)
+# --- UI ---
+pestañas = st.tabs(["📝 Texto", "📄 Documento"])
 
-# Subir archivo PDF
-uploaded_file = st.file_uploader("📄 Carga tu archivo PDF aquí", type=["pdf"])
+with pestañas[0]:
+    texto_manual = st.text_area("Escribe o pega el texto a leer:", height=200)
 
-if uploaded_file is not None:
-    try:
-        # Leer el PDF
-        reader = PdfReader(uploaded_file)
-        num_pages = len(reader.pages)
-        
-        st.success(f"✅ PDF cargado exitosamente. Total de páginas: {num_pages}")
-        
-        # Selector de página
-        page_num = st.slider(
-            "Selecciona la página a leer",
-            min_value=0,
-            max_value=num_pages - 1,
-            value=0
-        )
-        
-        # Extraer texto de la página
-        page = reader.pages[page_num]
-        text = page.extract_text()
-        
-        # Mostrar el texto
-        st.subheader(f"📖 Texto de la página {page_num + 1}:")
-        
-        if text.strip():
-            # Mostrar texto en un área de texto
-            st.text_area("", value=text, height=300, label_visibility="collapsed")
-            
-            # Separador
-            st.markdown("---")
-            
-            # Sección de audio
-            st.subheader("🔊 Reproductor de Audio")
-            
-            # Botón para generar audio
-            if st.button("🎙️ Generar y reproducir audio", type="primary"):
-                with st.spinner("Generando audio... esto puede tomar unos segundos"):
-                    try:
-                        # Configurar el idioma y acento
-                        if language == "es":
-                            tts = gTTS(text=text, lang=language, tld=accent)
-                        else:
-                            tts = gTTS(text=text, lang=language)
-                        
-                        # Guardar audio en memoria
-                        audio_buffer = io.BytesIO()
-                        tts.write_to_fp(audio_buffer)
-                        audio_buffer.seek(0)
-                        
-                        # Mostrar reproductor de audio
-                        st.audio(audio_buffer, format='audio/mp3')
-                        
-                        st.success("✅ ¡Audio generado! Conecta tus audífonos y presiona Play.")
-                        
-                        # Opción para descargar el audio
-                        st.download_button(
-                            label="💾 Descargar audio MP3",
-                            data=audio_buffer,
-                            file_name=f"pagina_{page_num + 1}.mp3",
-                            mime="audio/mp3"
-                        )
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error al generar el audio: {e}")
-        else:
-            st.warning("⚠️ No se pudo extraer texto de esta página.")
-            st.info("💡 Esto puede suceder si el PDF es una imagen escaneada. En el futuro podemos agregar OCR para resolver esto.")
-            
-    except Exception as e:
-        st.error(f"❌ Error al leer el PDF: {e}")
+with pestañas[1]:
+    archivo = st.file_uploader(
+        "Sube un documento", type=["pdf", "txt", "md", "docx"]
+    )
+    texto_archivo = extraer_texto(archivo) if archivo else ""
+    if archivo and texto_archivo:
+        st.success(f"Texto extraído: {len(texto_archivo):,} caracteres")
+        with st.expander("Ver texto extraído"):
+            st.write_text(texto_archivo[:3000])
+    elif archivo:
+        st.error("No pude extraer texto del documento (¿es un PDF escaneado?).")
 
-else:
-    # Mensaje inicial cuando no hay archivo
-    st.info("👆 Por favor, sube un archivo PDF para comenzar.")
-    
-    # Información adicional
-    st.markdown("""
-    ### 📝 Instrucciones:
-    1. **Sube un PDF** usando el botón de arriba
-    2. **Selecciona la página** que quieres escuchar
-    3. **Elige el idioma** en el panel lateral
-    4. **Presiona el botón** para generar el audio
-    5. **Conecta tus audífonos** y disfruta la lectura
-    
-    ---
-    
-    ### 💡 Consejos:
-    - Si el PDF es muy grande, lee página por página
-    - Puedes descargar el audio para escucharlo offline
-    - Ajusta la velocidad de reproducción en el reproductor
-    """)
+texto = texto_manual.strip() or texto_archivo.strip()
 
-# Footer
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: gray;'>
-    <small>Creado con Streamlit | 🎧 Lector de PDF con Voz</small>
-</div>
-""", unsafe_allow_html=True)
+col1, col2 = st.columns(2)
+with col1:
+    voz = st.selectbox("Voz", list(VOICES.keys()))
+with col2:
+    velocidad = st.select_slider(
+        "Velocidad", options=["-50%", "-25%", "Normal", "+25%", "+50%"], value="Normal"
+    )
+
+if st.button("🔊 Leer en voz alta", type="primary", disabled=not texto):
+    if not texto:
+        st.warning("Pega un texto o sube un documento primero.")
+    else:
+        with st.spinner("Generando audio..."):
+            rate = "+0%" if velocidad == "Normal" else velocidad
+            ssml_rate = f"{rate.replace('%', '%')}"
+            comunicar = edge_tts.Communicate(
+                texto, VOICES[voz], rate=ssml_rate
+            )
+            # edge-tts es async: lo ejecutamos en un loop
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                asyncio.run(comunicar.save(tmp.name))
+                audio_bytes = pathlib.Path(tmp.name).read_bytes()
+        st.audio(audio_bytes, format="audio/mp3")
+        st.download_button("⬇️ Descargar MP3", audio_bytes, "lectura.mp3", "audio/mp3")
