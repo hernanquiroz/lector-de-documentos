@@ -1,8 +1,11 @@
 import asyncio
+import pathlib
 import re
+import tempfile
 
 import edge_tts
 import streamlit as st
+from gtts import gTTS
 from pypdf import PdfReader
 
 # ---------------- Configuración de página ----------------
@@ -62,7 +65,7 @@ def dividir_en_fragmentos(texto: str, maximo: int = 2500) -> list:
 
 async def generar_audio(texto: str, voz: str, rate: str) -> bytes:
     """Genera el audio por fragmentos con reintentos y lo une en un MP3.
-    Compatible con cualquier versión de edge-tts (itera el stream manualmente)."""
+    Compatible con cualquier versión de edge-tts."""
     partes = []
     for trozo in dividir_en_fragmentos(texto):
         buffer = bytearray()
@@ -75,8 +78,7 @@ async def generar_audio(texto: str, voz: str, rate: str) -> bytes:
                         buffer.extend(mensaje.get("data", b""))
                 if len(buffer) > 0:
                     break  # fragmento exitoso
-                # sin audio: tratarlo como fallo y reintentar
-                await asyncio.sleep(1)
+                await asyncio.sleep(1)  # sin audio: reintentar
             except edge_tts.exceptions.NoAudioReceived:
                 if intento == 2:
                     raise
@@ -84,6 +86,14 @@ async def generar_audio(texto: str, voz: str, rate: str) -> bytes:
         if len(buffer) > 0:
             partes.append(bytes(buffer))
     return b"".join(partes)
+
+
+def generar_audio_gtts(texto: str, voz_elegida: str) -> bytes:
+    """Respaldo con gTTS (API de Google) si edge-tts falla."""
+    idioma = "en" if VOICES[voz_elegida].startswith("en") else "es"
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        gTTS(text=texto[:5000], lang=idioma).save(tmp.name)
+        return pathlib.Path(tmp.name).read_bytes()
 
 # ---------------- Interfaz ----------------
 pestana_texto, pestana_doc = st.tabs(["📝 Texto", "📄 Documento"])
@@ -118,26 +128,26 @@ if st.button("🔊 Leer en voz alta", type="primary", disabled=not texto):
         st.warning("Pega un texto o sube un documento primero.")
     else:
         rate = validar_rate(velocidad if velocidad != "Normal" else "+0%")
-        with st.spinner("Generando audio..."):
+        audio_bytes = b""
+
+        # 1) Intentar con edge-tts (voces neuronales, mejores)
+        with st.spinner("Generando audio (Edge TTS)..."):
             try:
                 audio_bytes = asyncio.run(generar_audio(texto, VOICES[voz_nombre], rate))
-                if not audio_bytes:
-                    st.error(
-                        "No se recibió audio del servicio. Prueba con otra voz, "
-                        "un texto más corto, o revisa la versión de edge-tts "
-                        "(debe ser 7.x o superior)."
-                    )
-                else:
-                    st.success("✅ Audio listo — reprodúcelo abajo.")
-                    st.audio(audio_bytes, format="audio/mp3")
-                    st.download_button(
-                        "⬇️ Descargar MP3", audio_bytes, "lectura.mp3", "audio/mp3"
-                    )
-            except edge_tts.exceptions.NoAudioReceived:
-                st.error(
-                    "El servicio de voz no respondió. Prueba con otra voz o un "
-                    "texto más corto. Si persiste, actualiza edge-tts en "
-                    "requirements.txt a la versión 7.x."
-                )
-            except Exception as e:
-                st.error(f"Error al generar el audio: {e}")
+            except Exception:
+                audio_bytes = b""  # falló: pasamos al respaldo
+
+        # 2) Respaldo con gTTS si edge-tts no devolvió nada
+        if not audio_bytes:
+            with st.spinner("Edge no respondió. Usando respaldo (Google TTS)..."):
+                try:
+                    audio_bytes = generar_audio_gtts(texto, voz_nombre)
+                    st.info("Audio generado con el respaldo de Google (voz menos natural).")
+                except Exception as e:
+                    st.error(f"Error al generar el audio: {e}")
+
+        # 3) Reproducir
+        if audio_bytes:
+            st.success("✅ Audio listo — reprodúcelo abajo.")
+            st.audio(audio_bytes, format="audio/mp3")
+            st.download_button("⬇️ Descargar MP3", audio_bytes, "lectura.mp3", "audio/mp3")
