@@ -161,8 +161,7 @@ def generar_audio_bloque(texto: str, voz: str, rate: str, etiqueta: str) -> byte
     """Genera el audio de un bloque de páginas (Edge con respaldo Google)."""
     fragmentos = dividir_en_fragmentos(texto)
     progreso = st.progress(0.0, text="Preparando...")
-    audio = b""
-    partes = []
+    audio, partes = b"", []
     try:
         for i, trozo in enumerate(fragmentos):
             partes.append(asyncio.run(generar_fragmento(trozo, voz, rate)))
@@ -186,14 +185,10 @@ def generar_audio_bloque(texto: str, voz: str, rate: str, etiqueta: str) -> byte
 
 # ---------------- Estado de la sesión ----------------
 ss = st.session_state
-defaults = {
-    "activo": False,        # ¿hay lectura por bloques en curso?
-    "pag_actual": 0,        # índice de la página inicial del bloque actual
-    "audio_bloque": b"",    # audio del bloque actual
-    "audio_total": b"",     # audio acumulado de todos los bloques leídos
-    "num_bloque": 0,        # número de bloque actual
-}
-for clave, valor in defaults.items():
+for clave, valor in {
+    "activo": False, "pag_actual": 0, "audio_bloque": b"",
+    "audio_total": b"", "num_bloque": 0, "detenido": False,
+}.items():
     if clave not in ss:
         ss[clave] = valor
 
@@ -214,8 +209,7 @@ with st.sidebar:
     st.divider()
     st.markdown("#### ℹ️ Formatos soportados")
     st.markdown("📄 PDF · 📝 TXT / MD · 📄 DOCX")
-    st.caption(f"Lectura por bloques de {PAGINAS_POR_BLOQUE} páginas, "
-               "preguntando si deseas continuar.")
+    st.caption(f"Lectura por bloques de {PAGINAS_POR_BLOQUE} páginas.")
     st.caption(f"edge-tts: {getattr(edge_tts, '__version__', 'desconocida')}")
 
     st.divider()
@@ -247,8 +241,9 @@ texto_paginas = []
 if archivo:
     texto_paginas = extraer_paginas(archivo)
     if texto_paginas:
+        n_bloques = len(range(0, len(texto_paginas), PAGINAS_POR_BLOQUE))
         st.success(f"✅ Documento cargado: **{len(texto_paginas)} páginas** "
-                   f"(se leerá en {len(range(0, len(texto_paginas), PAGINAS_POR_BLOQUE))} bloques)")
+                   f"({n_bloques} bloques de {PAGINAS_POR_BLOQUE} páginas)")
 
 # ---------------- Selección de rango ----------------
 if texto_paginas:
@@ -257,27 +252,20 @@ if texto_paginas:
         col_desde, col_hasta = st.columns(2)
         pag_desde = col_desde.number_input("Desde la página", 1, total, 1)
         pag_hasta = col_hasta.number_input("Hasta la página", 1, total, total)
-        if pag_hasta < pag_desde:
-            st.error("La página final debe ser mayor o igual a la inicial.")
 
-# ---------------- Iniciar lectura ----------------
+# ---------------- Iniciar ----------------
 st.markdown("")
 
-# Caso A: documento por bloques
 if archivo and texto_paginas and pag_hasta >= pag_desde:
-    inicio_idx = int(pag_desde) - 1
-    fin_idx = int(pag_hasta)
-
     if st.button("🔊  Comenzar lectura por bloques", type="primary",
                  use_container_width=True):
         ss.activo = True
-        ss.pag_actual = inicio_idx
+        ss.detenido = False
+        ss.pag_actual = int(pag_desde) - 1
         ss.audio_bloque = b""
         ss.audio_total = b""
         ss.num_bloque = 0
         st.rerun()
-
-    # Caso B: texto manual (lectura única)
 elif texto_manual.strip():
     if st.button("🔊  Leer en voz alta", type="primary", use_container_width=True):
         rate = validar_rate(velocidad if velocidad != "Normal" else "+0%")
@@ -289,87 +277,90 @@ elif texto_manual.strip():
             st.download_button("⬇️ Descargar MP3", audio, "lectura.mp3",
                                "audio/mp3", use_container_width=True)
 
-# ---------------- Flujo por bloques ----------------
-if ss.activo and texto_paginas:
-    fin_bloque = min(ss.pag_actual + PAGINAS_POR_BLOQUE, fin_idx)
-    paginas_bloque = texto_paginas[ss.pag_actual:fin_bloque]
+# ---------------- Lectura detenida por el usuario ----------------
+if ss.detenido:
+    st.success("⏹️ Lectura detenida.")
+    if ss.audio_total:
+        mb = len(ss.audio_total) / 1_048_576
+        st.markdown(f"**🎧 Audio leído hasta ahora:** {mb:.1f} MB")
+        st.download_button("⬇️ Descargar lo leído (MP3)", ss.audio_total,
+                           "lectura_parcial.mp3", "audio/mp3",
+                           use_container_width=True)
+    if st.button("🔄 Volver a empezar", use_container_width=True):
+        ss.detenido = False
+        ss.audio_total = b""
+        st.rerun()
 
-    if ss.pag_actual >= fin_idx:
-        # Fin del documento
-        st.success("🏁 **Lectura completada.** Ya no quedan páginas por leer.")
-        if ss.audio_total:
-            mb = len(ss.audio_total) / 1_048_576
-            st.markdown(f"**🎧 Audio completo de la lectura:** {mb:.1f} MB")
-            st.download_button("⬇️ Descargar audio completo (MP3)", ss.audio_total,
-                               "lectura_completa.mp3", "audio/mp3",
-                               use_container_width=True)
-        if st.button("🔄 Leer otro rango", use_container_width=True):
-            ss.activo = False
-            ss.audio_bloque = b""
-            ss.audio_total = b""
-            st.rerun()
+# ---------------- Fin del documento ----------------
+if ss.activo and texto_paginas and ss.pag_actual >= int(pag_hasta):
+    ss.activo = False
+    st.success("🏁 **Lectura completada.** Ya no quedan páginas del rango.")
+    if ss.audio_total:
+        mb = len(ss.audio_total) / 1_048_576
+        st.markdown(f"**🎧 Audio completo de la lectura:** {mb:.1f} MB")
+        st.download_button("⬇️ Descargar audio completo (MP3)", ss.audio_total,
+                           "lectura_completa.mp3", "audio/mp3",
+                           use_container_width=True)
 
-    else:
-        # Generar el bloque actual si aún no existe
-        if not ss.audio_bloque:
-            ss.num_bloque += 1
-            texto_bloque = "\n".join(paginas_bloque)
-            rate = validar_rate(velocidad if velocidad != "Normal" else "+0%")
-            ss.audio_bloque = generar_audio_bloque(
-                texto_bloque, VOICES[voz_nombre], rate,
-                f"bloque {ss.num_bloque}")
-            ss.audio_total += ss.audio_bloque  # acumular
+# ---------------- Flujo por bloques (bloque actual) ----------------
+if ss.activo and texto_paginas and ss.pag_actual < int(pag_hasta):
+    fin_bloque = min(ss.pag_actual + PAGINAS_POR_BLOQUE, int(pag_hasta))
 
-        st.markdown(
-            f"### 🎧 Bloque {ss.num_bloque}: páginas "
-            f"{ss.pag_actual + 1} – {fin_bloque}"
+    # Generar el bloque actual si aún no existe
+    if not ss.audio_bloque:
+        ss.num_bloque += 1
+        texto_bloque = "\n".join(texto_paginas[ss.pag_actual:fin_bloque])
+        rate = validar_rate(velocidad if velocidad != "Normal" else "+0%")
+        ss.audio_bloque = generar_audio_bloque(
+            texto_bloque, VOICES[voz_nombre], rate, f"bloque {ss.num_bloque}")
+        ss.audio_total += ss.audio_bloque
+
+    st.markdown(f"### 🎧 Bloque {ss.num_bloque}: páginas {ss.pag_actual + 1} – {fin_bloque}")
+
+    if ss.audio_bloque:
+        st.audio(ss.audio_bloque, format="audio/mp3")
+
+        # ---- Pregunta 1 (Sí/No): descargar este bloque ----
+        st.markdown("#### ❓ ¿Deseas descargar el audio de este bloque?")
+        respuesta_dl = st.radio(
+            "Selecciona una opción", ["No", "Sí"], horizontal=True,
+            key=f"dl_{ss.num_bloque}",
         )
+        if respuesta_dl == "Sí":
+            st.download_button(
+                "⬇️ Descargar este bloque (MP3)", ss.audio_bloque,
+                f"bloque_{ss.num_bloque}_pag{ss.pag_actual+1}-{fin_bloque}.mp3",
+                "audio/mp3", use_container_width=True)
 
-        if ss.audio_bloque:
-            st.audio(ss.audio_bloque, format="audio/mp3")
-
-            # Pregunta 1: ¿descargar este bloque?
-            st.markdown("**¿Deseas descargar el audio de este bloque?**")
-            col_s, col_n = st.columns(2)
-            with col_s:
-                if st.button("⬇️ Sí, descargar este bloque", use_container_width=True):
-                    pass  # el botón de descarga real está abajo
-            with col_n:
-                if st.button("No, gracias", use_container_width=True):
-                    st.session_state["descargar_bloque"] = False
+        # ---- Pregunta 2 (Sí/No): seguir escuchando ----
+        hay_mas = fin_bloque < int(pag_hasta)
+        if hay_mas:
+            st.markdown(f"#### ❓ ¿Deseas seguir escuchando? "
+                        f"(siguiente: páginas {fin_bloque + 1} – "
+                        f"{min(fin_bloque + PAGINAS_POR_BLOQUE, int(pag_hasta))})")
+            respuesta_cont = st.radio(
+                "Selecciona una opción", ["No, detener", "Sí, continuar"],
+                horizontal=True, key=f"cont_{ss.num_bloque}",
+            )
+            if respuesta_cont == "Sí, continuar":
+                if st.button("▶️  Generar el siguiente bloque",
+                             type="primary", use_container_width=True):
+                    ss.pag_actual = fin_bloque
+                    ss.audio_bloque = b""   # fuerza generar el siguiente bloque
                     st.rerun()
-            if st.session_state.get("descargar_bloque", True):
-                st.download_button(
-                    "⬇️ Descargar bloque (MP3)", ss.audio_bloque,
-                    f"bloque_{ss.num_bloque}_pag{ss.pag_actual+1}-{fin_bloque}.mp3",
-                    "audio/mp3", use_container_width=True)
-
-            # Pregunta 2: ¿seguir escuchando?
-            hay_mas = fin_bloque < fin_idx
-            if hay_mas:
-                st.markdown("**¿Deseas seguir escuchando el siguiente bloque?**")
-                col_si, col_no = st.columns(2)
-                with col_si:
-                    if st.button("✅ Sí, siguiente bloque", use_container_width=True):
-                        ss.pag_actual = fin_bloque
-                        ss.audio_bloque = b""   # fuerza generar el siguiente
-                        st.rerun()
-                with col_no:
-                    if st.button("⏹️ No, detener la lectura", use_container_width=True):
-                        st.info("Lectura detenida. Puedes descargar todo lo leído:")
-                        st.download_button(
-                            "⬇️ Descargar lo leído hasta ahora (MP3)", ss.audio_total,
-                            "lectura_parcial.mp3", "audio/mp3", use_container_width=True)
-                        ss.activo = False
-                        ss.audio_bloque = b""
-                        st.rerun()
             else:
-                st.info("Este es el último bloque del rango seleccionado. 🎉")
-                if st.button("🎧 Finalizar y descargar todo", use_container_width=True):
+                if st.button("⏹️  Detener la lectura", use_container_width=True):
+                    ss.activo = False
+                    ss.detenido = True
+                    ss.audio_bloque = b""
                     st.rerun()
         else:
-            st.error("No se pudo generar el audio de este bloque. "
-                     "Intenta de nuevo o prueba con otra voz.")
+            st.info("🎉 Este es el **último bloque** del rango seleccionado. "
+                    "Arriba encontrarás la descarga del audio completo cuando "
+                    "la marques como completada.")
+    else:
+        st.error("No se pudo generar el audio de este bloque. "
+                 "Pulsa 'Comenzar' de nuevo o prueba con otra voz.")
 
 # ---------------- Créditos ----------------
 st.markdown(
