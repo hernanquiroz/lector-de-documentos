@@ -1,4 +1,3 @@
-
 import asyncio
 import pathlib
 import re
@@ -18,15 +17,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---------------- Estilos personalizados ----------------
+# ---------------- Estilos ----------------
 st.markdown(
     """
     <style>
       .hero {
         background: linear-gradient(120deg, #1e3a8a 0%, #7c3aed 100%);
-        padding: 1.6rem 2rem;
-        border-radius: 1rem;
-        color: white;
+        padding: 1.6rem 2rem; border-radius: 1rem; color: white;
         margin-bottom: 1.5rem;
       }
       .hero h1 { margin: 0; font-size: 1.9rem; font-weight: 700; }
@@ -34,9 +31,7 @@ st.markdown(
       .card {
         background: rgba(128,128,128,0.06);
         border: 1px solid rgba(128,128,128,0.18);
-        border-radius: 0.9rem;
-        padding: 1.1rem 1.3rem;
-        margin-bottom: 1rem;
+        border-radius: 0.9rem; padding: 1.1rem 1.3rem; margin-bottom: 1rem;
       }
       .stButton > button[kind="primary"] {
         width: 100%; height: 3rem; font-size: 1.1rem; border-radius: 0.7rem;
@@ -48,18 +43,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------------- Encabezado ----------------
 st.markdown(
     """
     <div class="hero">
       <h1>📖 Lector de Documentos y Texto</h1>
-      <p>Textos y documentos grandes (PDF, TXT, DOCX — hasta 300+ páginas) leídos en voz alta.</p>
+      <p>Lee documentos grandes de 10 páginas en 10 páginas, preguntándote si deseas continuar.</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-# ---------------- Voces disponibles ----------------
+# ---------------- Voces ----------------
 VOICES = {
     "🇨🇴 Español (Colombia) – Voz masculina": "es-CO-AlvaroNeural",
     "🇨🇴 Español (Colombia) – Voz femenina": "es-CO-SalomeNeural",
@@ -69,8 +63,7 @@ VOICES = {
     "🇺🇸 Inglés (EE.UU.) – Voz femenina": "en-US-AriaNeural",
 }
 
-MAX_PAGINAS = 400          # límite de seguridad
-MAX_CARACTERES = 1_500_000  # ~300 páginas de texto denso
+PAGINAS_POR_BLOQUE = 10
 
 # ---------------- Utilidades ----------------
 def validar_rate(v: str) -> str:
@@ -80,7 +73,6 @@ def validar_rate(v: str) -> str:
 
 @st.cache_data(show_spinner="Extrayendo texto del documento...")
 def extraer_paginas(archivo) -> list:
-    """Devuelve una lista con el texto de cada página. Cacheado para no reextraer."""
     nombre = archivo.name.lower()
     paginas = []
     try:
@@ -93,13 +85,11 @@ def extraer_paginas(archivo) -> list:
             doc = docx.Document(archivo)
             texto = "\n".join(p.text for p in doc.paragraphs)
             while texto:
-                paginas.append(texto[:2500])
-                texto = texto[2500:]
+                paginas.append(texto[:2500]); texto = texto[2500:]
         elif nombre.endswith((".txt", ".md")):
             texto = archivo.read().decode("utf-8", errors="ignore")
             while texto:
-                paginas.append(texto[:2500])
-                texto = texto[2500:]
+                paginas.append(texto[:2500]); texto = texto[2500:]
         else:
             st.error("Formato no soportado.")
     except Exception as e:
@@ -122,7 +112,7 @@ def dividir_en_fragmentos(texto: str, maximo: int = 2500) -> list:
 
 
 async def generar_fragmento(trozo: str, voz: str, rate: str) -> bytes:
-    """Genera el MP3 de un fragmento con reintentos y pausas (evita errores 429)."""
+    """MP3 de un fragmento con reintentos y pausas (evita errores 429)."""
     for intento in range(4):
         buffer = bytearray()
         try:
@@ -132,17 +122,16 @@ async def generar_fragmento(trozo: str, voz: str, rate: str) -> bytes:
                     buffer.extend(mensaje.get("data", b""))
             if buffer:
                 return bytes(buffer)
-            time.sleep(2)  # sin audio: esperar y reintentar
+            time.sleep(2)
         except edge_tts.exceptions.NoAudioReceived:
             if intento == 3:
                 raise
-            time.sleep(3 * (intento + 1))  # espera creciente: 3, 6, 9 s
+            time.sleep(3 * (intento + 1))
     return b""
 
 
 def generar_audio_gtts(texto: str, idioma: str, progreso=None) -> bytes:
-    """Respaldo gTTS: fragmentos de <4.500 caracteres, con pausas y reintentos
-    ante el error 429 (Too Many Requests)."""
+    """Respaldo gTTS por fragmentos, con pausas y reintentos ante el 429."""
     trozos = dividir_en_fragmentos(texto, maximo=4500)
     partes = []
     for i, trozo in enumerate(trozos):
@@ -158,14 +147,55 @@ def generar_audio_gtts(texto: str, idioma: str, progreso=None) -> bytes:
                 if "429" in str(e) or "Too Many" in str(e):
                     if intento == 3:
                         raise
-                    time.sleep(5 * (intento + 1))  # 5, 10, 15 s antes de reintentar
+                    time.sleep(5 * (intento + 1))
                 else:
                     raise
         if progreso:
             progreso.progress((i + 1) / len(trozos),
                               text=f"Google TTS: fragmento {i + 1} de {len(trozos)}")
-        time.sleep(1.5)  # pausa fija entre peticiones: evita el 429
+        time.sleep(1.5)
     return b"".join(partes)
+
+
+def generar_audio_bloque(texto: str, voz: str, rate: str, etiqueta: str) -> bytes:
+    """Genera el audio de un bloque de páginas (Edge con respaldo Google)."""
+    fragmentos = dividir_en_fragmentos(texto)
+    progreso = st.progress(0.0, text="Preparando...")
+    audio = b""
+    partes = []
+    try:
+        for i, trozo in enumerate(fragmentos):
+            partes.append(asyncio.run(generar_fragmento(trozo, voz, rate)))
+            if i % 10 == 9:
+                time.sleep(2)
+            progreso.progress((i + 1) / len(fragmentos),
+                              text=f"Edge TTS ({etiqueta}): fragmento {i+1} de {len(fragmentos)}")
+        audio = b"".join(partes)
+    except Exception:
+        audio = b""
+    if not audio:
+        st.info("Edge no respondió. Generando con el respaldo de Google...")
+        idioma = "en" if voz.startswith("en") else "es"
+        try:
+            audio = generar_audio_gtts(texto, idioma, progreso)
+        except Exception as e:
+            progreso.empty()
+            st.error(f"Error al generar el audio: {e}")
+    progreso.empty()
+    return audio
+
+# ---------------- Estado de la sesión ----------------
+ss = st.session_state
+defaults = {
+    "activo": False,        # ¿hay lectura por bloques en curso?
+    "pag_actual": 0,        # índice de la página inicial del bloque actual
+    "audio_bloque": b"",    # audio del bloque actual
+    "audio_total": b"",     # audio acumulado de todos los bloques leídos
+    "num_bloque": 0,        # número de bloque actual
+}
+for clave, valor in defaults.items():
+    if clave not in ss:
+        ss[clave] = valor
 
 # ---------------- Barra lateral ----------------
 with st.sidebar:
@@ -184,10 +214,9 @@ with st.sidebar:
     st.divider()
     st.markdown("#### ℹ️ Formatos soportados")
     st.markdown("📄 PDF · 📝 TXT / MD · 📄 DOCX")
-    st.caption("Documentos de hasta 300+ páginas.")
-
-    st.divider()
-    st.caption(f"edge-tts versión: {getattr(edge_tts, '__version__', 'desconocida')}")
+    st.caption(f"Lectura por bloques de {PAGINAS_POR_BLOQUE} páginas, "
+               "preguntando si deseas continuar.")
+    st.caption(f"edge-tts: {getattr(edge_tts, '__version__', 'desconocida')}")
 
     st.divider()
     st.markdown(
@@ -195,7 +224,7 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-# ---------------- Contenido principal ----------------
+# ---------------- Cargar documento ----------------
 col_texto, col_doc = st.columns(2)
 
 with col_texto:
@@ -208,97 +237,139 @@ with col_texto:
 with col_doc:
     st.markdown(
         "<div class='card'><b>📄 Subir documento</b><br>"
-        "<small>PDF, TXT, MD o DOCX — hasta 300+ páginas.</small></div>",
+        "<small>PDF, TXT, MD o DOCX — lectura por bloques de "
+        f"{PAGINAS_POR_BLOQUE} páginas.</small></div>",
         unsafe_allow_html=True)
     archivo = st.file_uploader("Documento", type=["pdf", "txt", "md", "docx"],
                               label_visibility="collapsed")
 
-    texto_paginas = []
-    if archivo:
-        texto_paginas = extraer_paginas(archivo)
-        if len(texto_paginas) > MAX_PAGINAS:
-            st.warning(f"El documento tiene {len(texto_paginas)} páginas; "
-                       f"se leerán las primeras {MAX_PAGINAS}.")
-            texto_paginas = texto_paginas[:MAX_PAGINAS]
-        if texto_paginas:
-            st.success(f"✅ Documento cargado: **{len(texto_paginas)} páginas**")
+texto_paginas = []
+if archivo:
+    texto_paginas = extraer_paginas(archivo)
+    if texto_paginas:
+        st.success(f"✅ Documento cargado: **{len(texto_paginas)} páginas** "
+                   f"(se leerá en {len(range(0, len(texto_paginas), PAGINAS_POR_BLOQUE))} bloques)")
 
-# ---------------- Selección de páginas ----------------
+# ---------------- Selección de rango ----------------
 if texto_paginas:
-    with st.expander("📑 Seleccionar rango de páginas", expanded=len(texto_paginas) > 20):
+    with st.expander("📑 Seleccionar rango de páginas a leer"):
         total = len(texto_paginas)
         col_desde, col_hasta = st.columns(2)
         pag_desde = col_desde.number_input("Desde la página", 1, total, 1)
         pag_hasta = col_hasta.number_input("Hasta la página", 1, total, total)
         if pag_hasta < pag_desde:
             st.error("La página final debe ser mayor o igual a la inicial.")
-        seleccion = "\n".join(texto_paginas[pag_desde - 1: pag_hasta])
-        st.caption(f"Selección: {len(seleccion):,} caracteres — "
-                   f"~{max(1, len(seleccion) // 1000)} min de audio estimados.")
-else:
-    seleccion = ""
 
-texto = texto_manual.strip() or seleccion.strip()
-
-if texto and len(texto) > MAX_CARACTERES:
-    st.warning(f"Texto muy largo ({len(texto):,} caracteres). "
-               f"Se leerán los primeros {MAX_CARACTERES:,}.")
-
-# ---------------- Generar y reproducir audio ----------------
+# ---------------- Iniciar lectura ----------------
 st.markdown("")
-if st.button("🔊  Leer en voz alta", type="primary",
-             disabled=not texto, use_container_width=True):
-    if not texto:
-        st.warning("Pega un texto o sube un documento primero.")
-    else:
-        texto = texto[:MAX_CARACTERES]
+
+# Caso A: documento por bloques
+if archivo and texto_paginas and pag_hasta >= pag_desde:
+    inicio_idx = int(pag_desde) - 1
+    fin_idx = int(pag_hasta)
+
+    if st.button("🔊  Comenzar lectura por bloques", type="primary",
+                 use_container_width=True):
+        ss.activo = True
+        ss.pag_actual = inicio_idx
+        ss.audio_bloque = b""
+        ss.audio_total = b""
+        ss.num_bloque = 0
+        st.rerun()
+
+    # Caso B: texto manual (lectura única)
+elif texto_manual.strip():
+    if st.button("🔊  Leer en voz alta", type="primary", use_container_width=True):
         rate = validar_rate(velocidad if velocidad != "Normal" else "+0%")
-        voz = VOICES[voz_nombre]
-        fragmentos = dividir_en_fragmentos(texto)
-        progreso = st.progress(0.0, text="Preparando...")
-        audio_bytes = b""
-        usar_gtts = False
-
-        # 1) Edge TTS fragmento a fragmento, con pausas y progreso en vivo
-        partes = []
-        try:
-            for i, trozo in enumerate(fragmentos):
-                partes.append(asyncio.run(generar_fragmento(trozo, voz, rate)))
-                if i % 10 == 9:
-                    time.sleep(2)  # pausa cada 10 fragmentos (~25.000 caracteres)
-                progreso.progress(
-                    (i + 1) / len(fragmentos),
-                    text=f"Edge TTS: fragmento {i + 1} de {len(fragmentos)}...")
-            audio_bytes = b"".join(partes)
-        except Exception:
-            usar_gtts = True
-
-        # 2) Respaldo gTTS si Edge falló
-        if usar_gtts or not audio_bytes:
-            st.info("Edge no respondió. Generando con el respaldo de Google "
-                    "(voz menos natural)...")
-            idioma = "en" if voz.startswith("en") else "es"
-            try:
-                audio_bytes = generar_audio_gtts(texto, idioma, progreso)
-            except Exception as e:
-                progreso.empty()
-                st.error(f"Error al generar el audio: {e}")
-                audio_bytes = b""
-
-        progreso.empty()
-
-        # 3) Reproducir
-        if audio_bytes:
+        audio = generar_audio_bloque(texto_manual.strip(), VOICES[voz_nombre],
+                                    rate, "texto")
+        if audio:
             st.success("✅ Audio listo — reprodúcelo abajo o descárgalo.")
-            st.audio(audio_bytes, format="audio/mp3")
-            col_dl, col_info = st.columns([2, 3])
-            with col_dl:
-                st.download_button("⬇️ Descargar MP3", audio_bytes,
-                                   "lectura.mp3", "audio/mp3",
-                                   use_container_width=True)
-            with col_info:
-                mb = len(audio_bytes) / 1_048_576
-                st.metric("📦 Tamaño del audio", f"{mb:.1f} MB")
+            st.audio(audio, format="audio/mp3")
+            st.download_button("⬇️ Descargar MP3", audio, "lectura.mp3",
+                               "audio/mp3", use_container_width=True)
+
+# ---------------- Flujo por bloques ----------------
+if ss.activo and texto_paginas:
+    fin_bloque = min(ss.pag_actual + PAGINAS_POR_BLOQUE, fin_idx)
+    paginas_bloque = texto_paginas[ss.pag_actual:fin_bloque]
+
+    if ss.pag_actual >= fin_idx:
+        # Fin del documento
+        st.success("🏁 **Lectura completada.** Ya no quedan páginas por leer.")
+        if ss.audio_total:
+            mb = len(ss.audio_total) / 1_048_576
+            st.markdown(f"**🎧 Audio completo de la lectura:** {mb:.1f} MB")
+            st.download_button("⬇️ Descargar audio completo (MP3)", ss.audio_total,
+                               "lectura_completa.mp3", "audio/mp3",
+                               use_container_width=True)
+        if st.button("🔄 Leer otro rango", use_container_width=True):
+            ss.activo = False
+            ss.audio_bloque = b""
+            ss.audio_total = b""
+            st.rerun()
+
+    else:
+        # Generar el bloque actual si aún no existe
+        if not ss.audio_bloque:
+            ss.num_bloque += 1
+            texto_bloque = "\n".join(paginas_bloque)
+            rate = validar_rate(velocidad if velocidad != "Normal" else "+0%")
+            ss.audio_bloque = generar_audio_bloque(
+                texto_bloque, VOICES[voz_nombre], rate,
+                f"bloque {ss.num_bloque}")
+            ss.audio_total += ss.audio_bloque  # acumular
+
+        st.markdown(
+            f"### 🎧 Bloque {ss.num_bloque}: páginas "
+            f"{ss.pag_actual + 1} – {fin_bloque}"
+        )
+
+        if ss.audio_bloque:
+            st.audio(ss.audio_bloque, format="audio/mp3")
+
+            # Pregunta 1: ¿descargar este bloque?
+            st.markdown("**¿Deseas descargar el audio de este bloque?**")
+            col_s, col_n = st.columns(2)
+            with col_s:
+                if st.button("⬇️ Sí, descargar este bloque", use_container_width=True):
+                    pass  # el botón de descarga real está abajo
+            with col_n:
+                if st.button("No, gracias", use_container_width=True):
+                    st.session_state["descargar_bloque"] = False
+                    st.rerun()
+            if st.session_state.get("descargar_bloque", True):
+                st.download_button(
+                    "⬇️ Descargar bloque (MP3)", ss.audio_bloque,
+                    f"bloque_{ss.num_bloque}_pag{ss.pag_actual+1}-{fin_bloque}.mp3",
+                    "audio/mp3", use_container_width=True)
+
+            # Pregunta 2: ¿seguir escuchando?
+            hay_mas = fin_bloque < fin_idx
+            if hay_mas:
+                st.markdown("**¿Deseas seguir escuchando el siguiente bloque?**")
+                col_si, col_no = st.columns(2)
+                with col_si:
+                    if st.button("✅ Sí, siguiente bloque", use_container_width=True):
+                        ss.pag_actual = fin_bloque
+                        ss.audio_bloque = b""   # fuerza generar el siguiente
+                        st.rerun()
+                with col_no:
+                    if st.button("⏹️ No, detener la lectura", use_container_width=True):
+                        st.info("Lectura detenida. Puedes descargar todo lo leído:")
+                        st.download_button(
+                            "⬇️ Descargar lo leído hasta ahora (MP3)", ss.audio_total,
+                            "lectura_parcial.mp3", "audio/mp3", use_container_width=True)
+                        ss.activo = False
+                        ss.audio_bloque = b""
+                        st.rerun()
+            else:
+                st.info("Este es el último bloque del rango seleccionado. 🎉")
+                if st.button("🎧 Finalizar y descargar todo", use_container_width=True):
+                    st.rerun()
+        else:
+            st.error("No se pudo generar el audio de este bloque. "
+                     "Intenta de nuevo o prueba con otra voz.")
 
 # ---------------- Créditos ----------------
 st.markdown(
